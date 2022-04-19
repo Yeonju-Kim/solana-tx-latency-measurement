@@ -4,10 +4,11 @@ const parquet = require('parquetjs-lite');
 const moment = require('moment');
 const AWS = require('aws-sdk');
 const fs = require('fs');
+const axios = require('axios');
 
 require('dotenv').config();
-const keypair = web3.Keypair.fromSecretKey(Base58.decode(process.env.SIGNER_PRIVATE_KEY));
-const connection = new web3.Connection(web3.clusterApiUrl('testnet'), 'confirmed'); //To use mainnet, use 'mainnet-beta'
+const keypair = web3.Keypair.fromSecretKey(Base58.decode(process.env.SIGNER_PRIVATE_KEY)); //Base58 encoded private key (64 byte)-> generate keypair 
+const connection = new web3.Connection(web3.clusterApiUrl(process.env.CLUSTER_NAME), 'confirmed'); //To use mainnet, use 'mainnet-beta'
 
 async function makeParquetFile(data) {
   var schema = new parquet.ParquetSchema({
@@ -49,6 +50,19 @@ async function uploadToS3(data){
   fs.unlinkSync(filename) 
 }
 
+async function sendSlackMsg(msg) {
+  axios.post(process.env.SLACK_API_URL, {
+      'channel':process.env.SLACK_CHANNEL,
+      'mrkdown':true,
+      'text':msg
+  }, {
+      headers: {
+          'Content-type':'application/json',
+          'Authorization':`Bearer ${process.env.SLACK_AUTH}`
+      }
+  })
+}
+
 async function sendZeroSol(){
   var data = {
     executedAt: new Date().getTime(),
@@ -65,30 +79,41 @@ async function sendZeroSol(){
     const balance = await connection.getBalance(keypair.publicKey)
     if(balance*(10**(-9)) < parseFloat(process.env.BALANCE_ALERT_CONDITION_IN_SOL))
     { 
-      console.log(`Current balance of ${address} is less than ${process.env.BALANCE_ALERT_CONDITION_IN_SOL} ! balance=${balance*(10**(-9))}`)
+      sendSlackMsg(`Current balance of <${process.env.SCOPE_URL}/address/${keypair.publicKey}?cluster=${process.env.CLUSTER_NAME}|${keypair.publicKey}> is less than ${process.env.BALANCE_ALERT_CONDITION_IN_SOL} SOL! balance=${balance*(10**(-9))} SOL`)
     }
+  
+    var blockhash; 
+    await connection.getLatestBlockhash().then((result)=>{
+      blockhash = result.blockhash
+    });
+
+    const instruction = web3.SystemProgram.transfer({
+      fromPubkey: keypair.publicKey,
+      toPubkey: keypair.publicKey, 
+      lamports: 0, 
+    });
+
+    const tx = new web3.Transaction({
+      recentBlockhash: blockhash,
+      feePayer: keypair.publicKey
+    }).add(instruction);
+    tx.sign(keypair)
 
     // Write starttime 
     const start = new Date().getTime()
     data.startTime = start
+    
+    // Send signed transaction and wait til confirmation
+    const signature = await web3.sendAndConfirmRawTransaction(
+      connection,
+      tx.serialize(), // tx serialized in wire format 
+    )
 
-    const transaction = new web3.Transaction().add(
-      web3.SystemProgram.transfer({
-        fromPubkey: keypair.publicKey,
-        toPubkey: keypair.publicKey, 
-        lamports: 0, 
-      }),
-    );
-
-    const signature = await web3.sendAndConfirmTransaction(
-      connection, 
-      transaction, 
-      [keypair]
-    );
+    // Calc latency 
     const end = new Date().getTime()
     data.endTime = end
     data.latency = end-start
-    data.txhash = signature;
+    data.txhash = signature // same with base58.encode(tx.signature)
     console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.error}`)
 
   } catch{

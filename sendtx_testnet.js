@@ -69,7 +69,7 @@ async function sendZeroSol(){
     txhash: '', // Solana has no txHash. Instead, it uses tx signature. 
     startTime: 0,
     endTime: 0,
-    chainId: 0, //Solana has no chainId. 
+    chainId: process.env.CHAIN_ID, //Solana has no chainId. 
     latency:0,
     error:'',
   } 

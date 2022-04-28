@@ -4,7 +4,6 @@ const parquet = require('parquetjs-lite');
 const moment = require('moment');
 const AWS = require('aws-sdk');
 const fs = require('fs');
-const axios = require('axios');
 
 require('dotenv').config();
 const keypair = web3.Keypair.fromSecretKey(Base58.decode(process.env.SIGNER_PRIVATE_KEY)); //Base58 encoded private key (64 byte)-> generate keypair 
@@ -102,7 +101,7 @@ async function sendZeroSol(){
     // Write starttime 
     const start = new Date().getTime()
     data.startTime = start
-    
+
     // Send signed transaction and wait til confirmation
     const signature = await web3.sendAndConfirmRawTransaction(
       connection,

@@ -4,6 +4,10 @@ const parquet = require('parquetjs-lite');
 const moment = require('moment');
 const AWS = require('aws-sdk');
 const fs = require('fs');
+const axios = require('axios');
+const CoinGecko = require('coingecko-api');
+const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
+const CoinGeckoClient = new CoinGecko();
 
 require('dotenv').config();
 const keypair = web3.Keypair.fromSecretKey(Base58.decode(process.env.SIGNER_PRIVATE_KEY)); //Base58 encoded private key (64 byte)-> generate keypair 
@@ -17,7 +21,12 @@ async function makeParquetFile(data) {
       endTime:{type:'TIMESTAMP_MILLIS'},
       chainId:{type:'INT64'},
       latency:{type:'INT64'},
-      error:{type:'UTF8'}
+      error:{type:'UTF8'},
+      txFee:{type:'DOUBLE'},
+      txFeeInUSD:{type:'DOUBLE'},
+      latestBlockSize:{type:'INT64'},
+      numOfTxInLatestBlock:{type:'INT64'},
+      pingTime:{type:'INT64'}
   })
 
   var d = new Date()
@@ -62,6 +71,33 @@ async function sendSlackMsg(msg) {
   })
 }
 
+async function ping(data) {
+  var started = new Date().getTime();
+  var http = new XMLHttpRequest();
+  http.open("GET", web3.clusterApiUrl(process.env.CLUSTER_NAME), /*async*/true);
+  http.onreadystatechange = async ()=>{
+    if (http.readyState == http.DONE) {
+      var ended = new Date().getTime();
+      data.pingTime = ended - started;
+      try {
+        // measure ping time. then upload to s3 bucket 
+        await uploadToS3(data);
+      }
+      catch(err){
+        console.log('failed to s3.upload', err.toString())
+      }
+    }
+  };
+
+  try {
+    http.send(null);
+  } catch(err) {
+    console.log("failed to execute.", err.toString())
+    data.error = err.toString()
+    await uploadToS3(data);
+  }
+}
+
 async function sendZeroSol(){
   var data = {
     executedAt: new Date().getTime(),
@@ -71,6 +107,11 @@ async function sendZeroSol(){
     chainId: process.env.CHAIN_ID, //Solana has no chainId. 
     latency:0,
     error:'',
+    txFee: 0.0, 
+    txFeeInUSD: 0.0, 
+    latestBlockSize: 0,
+    numOfTxInLatestBlock: 0,
+    pingTime:0
   } 
 
   try{
@@ -81,10 +122,18 @@ async function sendZeroSol(){
       sendSlackMsg(`Current balance of <${process.env.SCOPE_URL}/address/${keypair.publicKey}?cluster=${process.env.CLUSTER_NAME}|${keypair.publicKey}> is less than ${process.env.BALANCE_ALERT_CONDITION_IN_SOL} SOL! balance=${balance*(10**(-9))} SOL`)
     }
   
-    var blockhash; 
-    await connection.getLatestBlockhash().then((result)=>{
-      blockhash = result.blockhash
-    });
+    var blockhash;
+    await connection.getLatestBlockhashAndContext().then(async (result)=>{
+      blockhash = result.value.blockhash
+      // Get the number of processed transactions 
+      await connection.getBlock(result.context.slot).then((response)=>{
+        data.numOfTxInLatestBlock = response.transactions.length
+      });
+      // Get the number of Singatures in the block 
+      await connection.getBlockSignatures(result.context.slot).then((res)=>{
+        data.latestBlockSize = res.signatures.length
+      })
+    })
 
     const instruction = web3.SystemProgram.transfer({
       fromPubkey: keypair.publicKey,
@@ -113,19 +162,30 @@ async function sendZeroSol(){
     data.endTime = end
     data.latency = end-start
     data.txhash = signature // same with base58.encode(tx.signature)
-    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.error}`)
 
-  } catch{
+    var SOLtoUSD;
+    await CoinGeckoClient.simple.price({
+      ids: ['solana'],
+      vs_currencies: ['usd']
+    }).then((response)=>{
+      SOLtoUSD = response.data['solana']['usd']
+    })
+
+    const response = await connection.getFeeForMessage(
+      tx.compileMessage(),
+      'confirmed',
+    );
+    const feeInLamports = response.value;
+
+    data.txFee = feeInLamports * 10**(-9)
+    data.txFeeInUSD = SOLtoUSD * data.txFee
+    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.latestBlockSize},${data.numOfTxInLatestBlock},${data.error}`)
+  } catch(err){
     console.log("failed to execute.", err.toString())
     data.error = err.toString()
-    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.error}`)
+    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.latestBlockSize},${data.numOfTxInLatestBlock},${data.error}`)
   }
-
-  try{
-    await uploadToS3(data)
-  } catch(err){
-    console.log('failed to s3.upload', err.toString())
-  }
+  await ping(data)
 }
 
 async function main (){

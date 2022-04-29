@@ -171,7 +171,7 @@ async function sendZeroSol(){
 async function main (){
   const start = new Date().getTime()
   console.log(`starting tx latency measurement... start time = ${start}`)
-  sendZeroSol()
+
   // run sendTx every SEND_TX_INTERVAL(sec).
   const interval = eval(process.env.SEND_TX_INTERVAL)
       setInterval(()=>{

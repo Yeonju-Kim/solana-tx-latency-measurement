@@ -6,7 +6,6 @@ const AWS = require('aws-sdk');
 const fs = require('fs');
 const axios = require('axios');
 const CoinGecko = require('coingecko-api');
-const XMLHttpRequest = require("xmlhttprequest").XMLHttpRequest;
 const CoinGeckoClient = new CoinGecko();
 
 require('dotenv').config();
@@ -24,7 +23,7 @@ async function makeParquetFile(data) {
       error:{type:'UTF8'},
       txFee:{type:'DOUBLE'},
       txFeeInUSD:{type:'DOUBLE'},
-      latestBlockSize:{type:'INT64'},
+      resourceUsedOfLatestBlock:{type:'INT64'},
       numOfTxInLatestBlock:{type:'INT64'},
       pingTime:{type:'INT64'}
   })
@@ -71,33 +70,6 @@ async function sendSlackMsg(msg) {
   })
 }
 
-async function ping(data) {
-  var started = new Date().getTime();
-  var http = new XMLHttpRequest();
-  http.open("GET", web3.clusterApiUrl(process.env.CLUSTER_NAME), /*async*/true);
-  http.onreadystatechange = async ()=>{
-    if (http.readyState == http.DONE) {
-      var ended = new Date().getTime();
-      data.pingTime = ended - started;
-      try {
-        // measure ping time. then upload to s3 bucket 
-        await uploadToS3(data);
-      }
-      catch(err){
-        console.log('failed to s3.upload', err.toString())
-      }
-    }
-  };
-
-  try {
-    http.send(null);
-  } catch(err) {
-    console.log("failed to execute.", err.toString())
-    data.error = err.toString()
-    await uploadToS3(data);
-  }
-}
-
 async function sendZeroSol(){
   var data = {
     executedAt: new Date().getTime(),
@@ -109,7 +81,7 @@ async function sendZeroSol(){
     error:'',
     txFee: 0.0, 
     txFeeInUSD: 0.0, 
-    latestBlockSize: 0,
+    resourceUsedOfLatestBlock: 0,
     numOfTxInLatestBlock: 0,
     pingTime:0
   } 
@@ -122,8 +94,12 @@ async function sendZeroSol(){
       sendSlackMsg(`Current balance of <${process.env.SCOPE_URL}/address/${keypair.publicKey}?cluster=${process.env.CLUSTER_NAME}|${keypair.publicKey}> is less than ${process.env.BALANCE_ALERT_CONDITION_IN_SOL} SOL! balance=${balance*(10**(-9))} SOL`)
     }
   
+    const startGetBlockHash = new Date().getTime();
     var blockhash;
     await connection.getLatestBlockhashAndContext().then(async (result)=>{
+      // Measure Latency for getLatestBlock
+      const endGetBlockHash = new Date().getTime()
+      data.pingTime = endGetBlockHash - startGetBlockHash; 
       blockhash = result.value.blockhash
       // Get the number of processed transactions 
       await connection.getBlock(result.context.slot).then((response)=>{
@@ -131,7 +107,7 @@ async function sendZeroSol(){
       });
       // Get the number of Singatures in the block 
       await connection.getBlockSignatures(result.context.slot).then((res)=>{
-        data.latestBlockSize = res.signatures.length
+        data.resourceUsedOfLatestBlock = res.signatures.length
       })
     })
 
@@ -179,19 +155,23 @@ async function sendZeroSol(){
 
     data.txFee = feeInLamports * 10**(-9)
     data.txFeeInUSD = SOLtoUSD * data.txFee
-    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.latestBlockSize},${data.numOfTxInLatestBlock},${data.error}`)
+    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.resourceUsedOfLatestBlock},${data.numOfTxInLatestBlock},${data.pingTime},${data.error}`)
   } catch(err){
     console.log("failed to execute.", err.toString())
     data.error = err.toString()
-    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.latestBlockSize},${data.numOfTxInLatestBlock},${data.error}`)
+    console.log(`${data.executedAt},${data.chainId},${data.txhash},${data.startTime},${data.endTime},${data.latency},${data.txFee},${data.txFeeInUSD},${data.resourceUsedOfLatestBlock},${data.numOfTxInLatestBlock},${data.pingTime},${data.error}`)
   }
-  await ping(data)
+  try{
+    await uploadToS3(data)
+  } catch(err){
+    console.log('failed to s3.upload', err.toString())
+  }
 }
 
 async function main (){
   const start = new Date().getTime()
   console.log(`starting tx latency measurement... start time = ${start}`)
-
+  sendZeroSol()
   // run sendTx every SEND_TX_INTERVAL(sec).
   const interval = eval(process.env.SEND_TX_INTERVAL)
       setInterval(()=>{
